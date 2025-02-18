@@ -18,10 +18,12 @@ class CoTrackerPredictor(torch.nn.Module):
         offline=True,
         v2=False,
         window_len=60,
+        feature_loader = None,
     ):
         super().__init__()
         self.v2 = v2
         self.support_grid_size = 6
+        self.feature_loader = feature_loader
         model = build_cotracker(
             checkpoint,
             v2=v2,
@@ -114,9 +116,14 @@ class CoTrackerPredictor(torch.nn.Module):
             video, tuple(self.interp_shape), mode="bilinear", align_corners=True
         )
         video = video.reshape(B, T, 3, self.interp_shape[0], self.interp_shape[1])
-
+        
         if queries is not None:
+            
             B, N, D = queries.shape
+            
+            if D == 2:
+                queries = torch.cat([torch.ones_like(queries[:, :, :1]) * grid_query_frame, queries],dim=2,)
+                D +=1
             assert D == 3
             queries = queries.clone()
             queries[:, :, 1:] *= queries.new_tensor(
@@ -143,7 +150,7 @@ class CoTrackerPredictor(torch.nn.Module):
                 [torch.ones_like(grid_pts[:, :, :1]) * grid_query_frame, grid_pts],
                 dim=2,
             ).repeat(B, 1, 1)
-
+            # breakpoint()
         if add_support_grid:
             grid_pts = get_points_on_a_grid(
                 self.support_grid_size, self.interp_shape, device=video.device
@@ -155,7 +162,8 @@ class CoTrackerPredictor(torch.nn.Module):
             queries = torch.cat([queries, grid_pts], dim=1)
 
         tracks, visibilities, *_ = self.model.forward(
-            video=video, queries=queries, iters=6
+            video=video, queries=queries, iters=6,
+            feature_loader = self.feature_loader,
         )
 
         if backward_tracking:

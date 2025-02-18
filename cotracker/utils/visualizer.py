@@ -22,6 +22,7 @@ def read_video_from_path(path):
     except Exception as e:
         print("Error opening video file: ", e)
         return None
+    breakpoint()
     frames = []
     for i, im in enumerate(reader):
         frames.append(np.array(im))
@@ -65,9 +66,9 @@ class Visualizer:
         save_dir: str = "./results",
         grayscale: bool = False,
         pad_value: int = 0,
-        fps: int = 10,
+        fps: int = 24,
         mode: str = "rainbow",  # 'cool', 'optical_flow'
-        linewidth: int = 2,
+        linewidth: int = 1,
         show_first_frame: int = 10,
         tracks_leave_trace: int = 0,  # -1 for infinite
     ):

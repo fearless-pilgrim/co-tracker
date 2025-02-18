@@ -49,6 +49,7 @@ class CoTrackerThreeBase(nn.Module):
         num_virtual_tracks=64,
         model_resolution=(384, 512),
         add_space_attn=True,
+        att_dim=768,
         linear_layer_for_vis_conf=True,
     ):
         super(CoTrackerThreeBase, self).__init__()
@@ -82,7 +83,12 @@ class CoTrackerThreeBase(nn.Module):
             linear_layer_for_vis_conf=linear_layer_for_vis_conf,
         )
         self.corr_mlp = Mlp(in_features=49 * 49, hidden_features=384, out_features=256)
-
+        #not share the same weights
+        # self.att_mlp = Mlp(
+        #     in_features=2*att_dim,
+        #     hidden_features=384,
+        #     out_features=256,
+        # )
         time_grid = torch.linspace(0, window_len - 1, window_len).reshape(
             1, window_len, 1
         )
@@ -199,9 +205,11 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
                     .squeeze(1)
                     .permute(0, 3, 1, 2, 4)
                 )
+                # breakpoint()
                 corr_volume = torch.einsum(
                     "btnhwc,bnijc->btnhwij", corr_feat, track_feat_support
                 )
+                # breakpoint()
                 corr_emb = self.corr_mlp(corr_volume.reshape(B * S * N, r * r * r * r))
 
                 corr_embs.append(corr_emb)
@@ -245,8 +253,9 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
             )
 
             x = x + self.interpolate_time_embed(x, S)
+            # breakpoint()
             x = x.view(B, N, S, -1)  # (B N) T D -> B N T D
-
+            breakpoint()
             delta = self.updateformer(x, add_space_attn=add_space_attn)
 
             delta_coords = delta[..., :2].permute(0, 2, 1, 3)
@@ -292,7 +301,7 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
         B, T, C, H, W = video.shape
         device = queries.device
         assert H % self.stride == 0 and W % self.stride == 0
-
+        breakpoint()
         B, N, __ = queries.shape
         # B = batch size
         # S_trimmed = actual number of frames in the window
@@ -372,6 +381,7 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
         # Compute convolutional features for the video or for the current chunk in case of online mode
         if (not is_train) and (T > fmaps_chunk_size):
             fmaps = []
+            breakpoint()
             for t in range(0, T, fmaps_chunk_size):
                 video_chunk = video[:, t : t + fmaps_chunk_size]
                 fmaps_chunk = self.fnet(video_chunk.reshape(-1, C_, H, W))
@@ -403,6 +413,7 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
                 B * T_pad, self.latent_dim, fmaps.shape[-2], fmaps.shape[-1]
             )
             fmaps_ = F.avg_pool2d(fmaps_, 2, stride=2)
+            breakpoint()
             fmaps = fmaps_.reshape(
                 B, T_pad, self.latent_dim, fmaps_.shape[-2], fmaps_.shape[-1]
             )
@@ -500,6 +511,7 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
                 iters=iters,
                 add_space_attn=add_space_attn,
             )
+            # breakpoint()
             S_trimmed = (
                 T if is_online else min(T - ind, S)
             )  # accounts for last window duration

@@ -14,7 +14,7 @@ from cotracker.utils.visualizer import Visualizer, read_video_from_path
 from cotracker.predictor import CoTrackerPredictor
 
 DEFAULT_DEVICE = (
-    "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    "cuda:2" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 )
 
 # if DEFAULT_DEVICE == "mps":
