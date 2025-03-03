@@ -173,48 +173,36 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
             corr_embs, att_embs = [], []
             corr_feats = []
             for i in range(self.corr_levels):
-                corr_feat = self.get_correlation_feat(
-                    fmaps_pyramid[i], coords_init / 2**i
-                )
-                track_feat_support = (
-                    track_feat_support_pyramid[i]
-                    .view(B, 1, r, r, N, self.latent_dim)
-                    .squeeze(1)
-                    .permute(0, 3, 1, 2, 4)
-                )
-
+                if i < 2:
+                    corr_feat = self.get_correlation_feat(
+                        fmaps_pyramid[i], coords_init / 2**i
+                    )
+                    track_feat_support = (
+                        track_feat_support_pyramid[i]
+                        .view(B, 1, r, r, N, self.latent_dim)
+                        .squeeze(1)
+                        .permute(0, 3, 1, 2, 4)
+                    )
+                else:
+                    corr_feat = self.get_correlation_feat(
+                        att_pyramid[i-2], coords_init / 2**i
+                    )
+                    track_feat_support = (
+                        track_att_pyramid[i-2]
+                        .view(B, 1, r, r, N, att_dim)
+                        .squeeze(1)
+                        .permute(0, 3, 1, 2, 4)
+                    )
+                    
                 corr_volume = torch.einsum(
                     "btnhwc,bnijc->btnhwij", corr_feat, track_feat_support
                 )
-
                 corr_emb = self.corr_mlp(corr_volume.reshape(B * T * N, r * r * r * r))
                 corr_embs.append(corr_emb)
-                
-                if i < 2:
-                    continue
-                corr_feat_att = self.get_correlation_feat(
-                    att_pyramid[i-2], coords_init / 2**i
-                )
-                track_feat_supp_d = (
-                    track_att_pyramid[i-2]
-                    .view(B, 1, r, r, N, att_dim)
-                    .squeeze(1)
-                    .permute(0, 3, 1, 2, 4)
-                )
-                att_volume = torch.einsum(
-                    "btnhwc,bnijc->btnhwij", corr_feat_att, track_feat_supp_d
-                )
-                att_emb = self.corr_mlp(att_volume.reshape(B * T * N, r * r * r * r))
-                att_embs.append(att_emb)
-
-                
+            
             corr_embs = torch.cat(corr_embs, dim=-1)
             corr_embs = corr_embs.view(B, T, N, corr_embs.shape[-1])
-
-            att_embs = torch.cat(att_embs, dim=-1)
-            att_embs = att_embs.view(B, T, N, att_embs.shape[-1])
             
-            corr_embs = torch.cat([corr_embs, att_embs], dim=-1)
             transformer_input = [vis[..., None], confidence[..., None], corr_embs]
 
             rel_coords_forward = coords[:, :-1] - coords[:, 1:]
@@ -242,7 +230,6 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
                 max_deg=10,
             )  # batch, num_points, num_frames, 84
             transformer_input.append(rel_pos_emb_input)
-            breakpoint()
             x = (
                 torch.cat(transformer_input, dim=-1)
                 .permute(0, 2, 1, 3)

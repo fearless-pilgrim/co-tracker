@@ -179,6 +179,8 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
         fmaps_pyramid,
         coords,
         track_feat_support_pyramid,
+        att_pyramid=None,
+        track_att_pyramid=None,
         vis=None,
         conf=None,
         attention_mask=None,
@@ -196,19 +198,33 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
             corr_embs = []
             corr_feats = []
             for i in range(self.corr_levels):
-                corr_feat = self.get_correlation_feat(
-                    fmaps_pyramid[i], coords_init / 2**i
-                )
-                track_feat_support = (
-                    track_feat_support_pyramid[i]
-                    .view(B, 1, r, r, N, self.latent_dim)
-                    .squeeze(1)
-                    .permute(0, 3, 1, 2, 4)
-                )
+                if i < 2:
+                    corr_feat = self.get_correlation_feat(
+                        fmaps_pyramid[i], coords_init / 2**i
+                    )
+                    track_feat_support = (
+                        track_feat_support_pyramid[i]
+                        .view(B, 1, r, r, N, self.latent_dim)
+                        .squeeze(1)
+                        .permute(0, 3, 1, 2, 4)
+                    )
+                else:
+                    corr_feat = self.get_correlation_feat(
+                        att_pyramid[i-2], coords_init / 2**i
+                    )
+                    track_feat_support = (
+                        track_att_pyramid[i-2]
+                        .view(B, 1, r, r, N, self.att_dim)
+                        .squeeze(1)
+                        .permute(0, 3, 1, 2, 4)
+                    )
+                
                 # breakpoint()
                 corr_volume = torch.einsum(
                     "btnhwc,bnijc->btnhwij", corr_feat, track_feat_support
                 )
+                
+
                 # breakpoint()
                 corr_emb = self.corr_mlp(corr_volume.reshape(B * S * N, r * r * r * r))
 
@@ -281,6 +297,7 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
         add_space_attn=True,
         fmaps_chunk_size=200,
         is_online=False,
+        feature_loader = None,
     ):
         """Predict tracks
 
@@ -301,7 +318,7 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
         B, T, C, H, W = video.shape
         device = queries.device
         assert H % self.stride == 0 and W % self.stride == 0
-        breakpoint()
+
         B, N, __ = queries.shape
         # B = batch size
         # S_trimmed = actual number of frames in the window
@@ -324,6 +341,13 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
             ), "Call model.init_video_online_processing() first."
             assert not is_train, "Training not supported in online mode."
 
+        #load B*T 2 C H_ W_ features
+        att_features = feature_loader.load_features(video)
+        _, _, self.att_dim, att_H, att_W = att_features.shape
+        assert att_H == H4 // self.stride and att_W == W4 // self.stride
+        att_fea_ = att_features[:, 0].reshape(B, T, self.att_dim, att_H, att_W)
+        att_fea_l = att_features[:, 1]
+        
         step = S // 2  # How much the sliding window moves at every step
 
         video = 2 * (video / 255.0) - 1.0
@@ -404,16 +428,21 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
         fmaps = fmaps.to(dtype)
 
         # We compute track features
-        fmaps_pyramid = []
+        fmaps_pyramid, att_pyramid = [], []
         track_feat_pyramid = []
-        track_feat_support_pyramid = []
+        track_feat_support_pyramid, track_att_pyramid = [], []
         fmaps_pyramid.append(fmaps)
+        
+        #(H4//4, W4//4) (W4//8, H4//8)
+        att_pyramid.append(att_fea_)
+        att_fea_l = F.avg_pool2d(att_fea_l.reshape(B*T, att_dim, att_H, att_W), 2, stride=2)
+        att_pyramid.append(att_fea_l.reshape(B, T, att_dim, att_H//2, att_W//2))
+
         for i in range(self.corr_levels - 1):
             fmaps_ = fmaps.reshape(
                 B * T_pad, self.latent_dim, fmaps.shape[-2], fmaps.shape[-1]
             )
             fmaps_ = F.avg_pool2d(fmaps_, 2, stride=2)
-            breakpoint()
             fmaps = fmaps_.reshape(
                 B, T_pad, self.latent_dim, fmaps_.shape[-2], fmaps_.shape[-1]
             )
@@ -425,12 +454,28 @@ class CoTrackerThreeOnline(CoTrackerThreeBase):
             sample_mask = (sample_frames >= left) & (sample_frames < right)
 
         for i in range(self.corr_levels):
+            
             track_feat, track_feat_support = self.get_track_feat(
                 fmaps_pyramid[i],
-                queried_frames - self.online_ind if is_online else queried_frames,
+                queried_frames,
                 queried_coords / 2**i,
                 support_radius=self.corr_radius,
             )
+
+            track_feat_pyramid.append(track_feat.repeat(1, T, 1, 1))
+            track_feat_support_pyramid.append(track_feat_support.unsqueeze(1))
+            
+            if i < 2:
+                continue
+            #collect the support track features from attention maps
+            #(H4//4, W4//4) (W4//8, H4//8)
+            _, track_feat_supp_d = self.get_track_feat(
+                att_pyramid[i-2],
+                queried_frames,
+                queried_coords / 2**i,
+                support_radius=self.corr_radius,
+            )
+            track_att_pyramid.append(track_feat_supp_d.unsqueeze(1))
 
             if is_online:
                 if self.online_track_feat[i] is None:

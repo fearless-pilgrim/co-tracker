@@ -490,10 +490,10 @@ class EfficientUpdateFormer(nn.Module):
         _, N, _, _ = tokens.shape
         j = 0
         layers = []
-        breakpoint()
+
         for i in range(len(self.time_blocks)):
             time_tokens = tokens.contiguous().view(B * N, T, -1)  # B N T C -> (B N) T C
-            breakpoint()
+
             time_tokens = self.time_blocks[i](time_tokens)
 
             tokens = time_tokens.view(B, N, T, -1)  # (B N) T C -> B N T C
@@ -508,13 +508,13 @@ class EfficientUpdateFormer(nn.Module):
 
                 point_tokens = space_tokens[:, : N - self.num_virtual_tracks]
                 virtual_tokens = space_tokens[:, N - self.num_virtual_tracks :]
-                breakpoint()
+
                 virtual_tokens = self.space_virtual2point_blocks[j](
                     virtual_tokens, point_tokens, mask=mask
                 )
-                breakpoint()
+
                 virtual_tokens = self.space_virtual_blocks[j](virtual_tokens)
-                breakpoint()
+  
                 point_tokens = self.space_point2virtual_blocks[j](
                     point_tokens, virtual_tokens, mask=mask
                 )
@@ -525,7 +525,7 @@ class EfficientUpdateFormer(nn.Module):
                 )  # (B T) N C -> B N T C
                 j += 1
         tokens = tokens[:, : N - self.num_virtual_tracks]
-        breakpoint()
+
         flow = self.flow_head(tokens)
         if self.linear_layer_for_vis_conf:
             vis_conf = self.vis_conf_head(tokens)

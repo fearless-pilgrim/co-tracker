@@ -66,7 +66,7 @@ class Visualizer:
         save_dir: str = "./results",
         grayscale: bool = False,
         pad_value: int = 0,
-        fps: int = 24,
+        fps: int = 15,
         mode: str = "rainbow",  # 'cool', 'optical_flow'
         linewidth: int = 1,
         show_first_frame: int = 10,

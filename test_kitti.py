@@ -88,10 +88,8 @@ if __name__ == "__main__":
     video_list.sort()
     img_lists = []
     for i, frame in enumerate(video_list):
-        if i % 1 == 0:
+        if i % 4 == 0:
             img_lists.append(np.array(Image.open(frame)))
-        if i == 15:
-            break
     frames = np.stack(img_lists)
     # video = read_video_from_path(np.array(video_list))
     video = torch.from_numpy(frames).permute(0, 3, 1, 2)[None].float()
