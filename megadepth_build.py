@@ -66,8 +66,8 @@ class MultiviewMatcherDataModule(LightningDataModule):
         self.train_loader_params = {
             "batch_size": self.batch_size,
             # "shuffle": True,
-            # "num_workers": self.num_workers,
-            "num_workers": 0,
+            "num_workers": self.num_workers,
+            # "num_workers": 0,
             "pin_memory": self.pin_memory,
         }
         self.val_loader_params = {
@@ -115,7 +115,7 @@ class MultiviewMatcherDataModule(LightningDataModule):
                 megadepth_load.MultiviewMatchingDataset(data_root, scene_info_path, mode=mode,
                                     img_resize=self.img_resize, max_queries=self.max_queries,
                                     # coarse_scale=self.coarse_scale, sort_type=self.sort_type,
-                                    augmentor=augmentor))
+                                    adjust_intrinsic=True, augmentor=augmentor))
         return ConcatDataset(datasets)
 
 
