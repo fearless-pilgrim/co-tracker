@@ -12,7 +12,7 @@ from pytorch_lightning import LightningDataModule
 from torch.utils.data.dataloader import DataLoader
 from cotracker.datasets.megadepth_sampler import RandomConcatSampler
 from torch.utils.data import DataLoader, ConcatDataset, DistributedSampler, RandomSampler
-
+from cotracker.datasets.utils import collate_fn_train
 
 def get_local_split(items: np.ndarray, world_size: int, rank: int, seed: int):
     n_items = len(items)
@@ -59,13 +59,15 @@ class MultiviewMatcherDataModule(LightningDataModule):
         # self.df = kwargs["df"]
         # self.coarse_scale = kwargs["coarse_scale"]
         self.img_resize = kwargs["img_resize"]
+        self.max_queries = kwargs["max_queries"]
         self.augmentor = None
 
         # Loader parameters:
         self.train_loader_params = {
             "batch_size": self.batch_size,
             # "shuffle": True,
-            "num_workers": self.num_workers,
+            # "num_workers": self.num_workers,
+            "num_workers": 0,
             "pin_memory": self.pin_memory,
         }
         self.val_loader_params = {
@@ -82,15 +84,15 @@ class MultiviewMatcherDataModule(LightningDataModule):
         }
 
         # Sampler:
-        self.data_sampler = kwargs['data_sampler'] # 
-        self.n_samples_per_subset = kwargs['n_samples_per_subset']  # 200
-        self.subset_replacement = kwargs['subset_sample_replacement']  # True
-        self.shuffle = kwargs['shuffle_within_epoch_subset']  # True
-        self.repeat = kwargs['repeat_sample']  # 1
+        self.data_sampler = "random"# 
+        self.n_samples_per_subset = 200  # 200
+        self.subset_replacement = True  # True
+        self.shuffle = True # True
+        self.repeat = 1  # 1
         
         # RandomSampler
-        self.replacement = kwargs['replacement']  # False, whether draw with replacement or not.
-        self.num_samples = kwargs['num_samples']  # None, can be n_samples_per_subset * n_subsets_per_gpu
+        self.replacement = False  # False, whether draw with replacement or not.
+        self.num_samples = None  # None, can be n_samples_per_subset * n_subsets_per_gpu
 
         self.random_seed = kwargs['random_seed']
 
@@ -111,9 +113,9 @@ class MultiviewMatcherDataModule(LightningDataModule):
             # `ScanNetDatasetNpz`/`MegaDepthDatasetNpz` load all data from npz_path in __init__, which might take times.
             datasets.append(
                 megadepth_load.MultiviewMatchingDataset(data_root, scene_info_path, mode=mode,
-                                    img_resize=self.img_resize, depth_max_size=self.depth_max_size, 
+                                    img_resize=self.img_resize, max_queries=self.max_queries,
                                     # coarse_scale=self.coarse_scale, sort_type=self.sort_type,
-                                    augmentor=augmentor, padding=self.img_pad, df=self.df))
+                                    augmentor=augmentor))
         return ConcatDataset(datasets)
 
 
@@ -140,7 +142,6 @@ class MultiviewMatcherDataModule(LightningDataModule):
         Args:
             stage (str): 'fit' in training phase, and 'test' in testing phase. (regulation set by PL)
         """
-        assert stage in ['fit', 'test']
         try:
             self.world_size = dist.get_world_size()
             self.rank = dist.get_rank()
@@ -151,11 +152,9 @@ class MultiviewMatcherDataModule(LightningDataModule):
             self.world_size = 1
             self.rank = 0
         
-        if stage == 'fit':
-            self.train_dataset = self.setup_dataset(mode='train')
-            self.val_dataset = self.setup_dataset(mode='val')
-        else:
-            self.test_dataset = self.setup_dataset(mode='test')
+        self.train_dataset = self.setup_dataset(mode='train')
+        self.val_dataset = self.setup_dataset(mode='val')
+        self.test_dataset = self.setup_dataset(mode='test')
 
     def train_dataloader(self):
         """for training dataset, use custom sampler instead of DistributedSampler"""
@@ -175,12 +174,12 @@ class MultiviewMatcherDataModule(LightningDataModule):
         else:  # 'none'
             sampler = None
 
-        return DataLoader(self.train_dataset, sampler=sampler, **self.train_loader_params)
+        return DataLoader(self.train_dataset, sampler=sampler, collate_fn=collate_fn_train, **self.train_loader_params)
 
     def val_dataloader(self):
         sampler = DistributedSampler(self.val_dataset, shuffle=False)
-        return DataLoader(dataset=self.val_dataset, sampler=sampler, **self.val_loader_params)
+        return DataLoader(dataset=self.val_dataset, sampler=sampler, collate_fn=collate_fn_train, **self.val_loader_params)
 
     def test_dataloader(self):
         sampler = DistributedSampler(self.test_dataset, shuffle=False)
-        return DataLoader(dataset=self.test_dataset, sampler=sampler, **self.test_loader_params)
+        return DataLoader(dataset=self.test_dataset, sampler=sampler, collate_fn=collate_fn_train, **self.test_loader_params)

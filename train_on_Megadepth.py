@@ -41,6 +41,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--num_steps", type=int, default=200000, help="length of training schedule."
     )
+    parser.add_argument("--scene_info_dir",
+                        default="/data1/local_userdata/wangzhiwei/datasets/MegaDepth_v1/multiview_matching_indices/scenes/",
+                        help="path to save checkpoints")
+    parser.add_argument("--dataset_root",
+                        default="/data1/local_userdata/wangzhiwei/datasets/MegaDepth_v1/",
+                        help="path to save checkpoints")
+    parser.add_argument("--train_val_list_path",
+                        default="/data1/local_userdata/wangzhiwei/datasets/MegaDepth_v1/multiview_matching_indices/train_val_list/",
+                        help="path to save checkpoints")
     parser.add_argument(
         "--evaluate_every_n_epoch",
         type=int,
@@ -70,9 +79,7 @@ if __name__ == "__main__":
         default=768,
         help="the number of trajectories to sample for training",
     )
-    parser.add_argument(
-        "--dataset_root", type=str, help="path lo all the datasets (train and eval)"
-    )
+
 
     parser.add_argument(
         "--train_iters",
@@ -170,6 +177,12 @@ if __name__ == "__main__":
         help="number of extra SIFT points that we sample at training.",
     )
     parser.add_argument(
+        "--assist_model_path",
+        type=str,
+        default='/home/wangzhiwei/depth_estimation/dust3r_1228/dust3r/checkpoint/DUSt3R_ViTLarge_BaseDecoder_512_dpt.pth',
+        help="path to assist model ckpt",
+    )
+    parser.add_argument(
         "--real_data_filter_superpoint",
         action="store_true",
         help="select point to track based on SuperPoint features",
@@ -209,6 +222,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--limit_samples", type=int, default=10000, help="limit samples on real data"
     )
+    parser.add_argument(
+        "--max_queries", type=int, default=1000, help="max query points for training"
+    )
+    parser.add_argument(
+        "--introduce_teacher", action="store_true", 
+        help="whether introduce teacher network to training",
+    )
+
 
     args = parser.parse_args()
     logging.basicConfig(

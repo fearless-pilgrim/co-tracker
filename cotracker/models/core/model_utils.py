@@ -51,6 +51,36 @@ def get_superpoint_sampled_pts(
         points.append(torch.cat([frame_tensor.cuda(), key_points], dim=2))
     return torch.cat(points, dim=1)[:, :size, :]
 
+@torch.no_grad()
+def get_query_ponts(query_image, grid_size=50, max_query_num=2500):
+    # import cv2
+    B, C, H, W = query_image.shape
+    from lightglue import SIFT
+    
+    sift = SIFT().cuda()
+    query_points = get_points_on_a_grid(center=(H//2, W//2), size=grid_size, extent=(H, W), device=query_image.device)
+    
+    pred_sift = sift({"image": query_image[0][None]})["keypoints"].round()
+    query_points = torch.cat((pred_sift[0], query_points[0]), dim=0).long()
+    mask_coor = (query_points[..., 1]* W + query_points[..., 0]).round()
+    assert mask_coor.max() < H*W, f"max: {mask_coor.max()}; H*W: {H*W}"
+    unique_points = np.unique(mask_coor.cpu().numpy(), axis=0)
+    sample_points = torch.tensor(unique_points, device=query_image.device)
+    sample_mask = torch.zeros((B, H*W), device=query_image.device) 
+
+    if sample_points.shape[0] > max_query_num:
+        random_indice = torch.randperm(sample_points.shape[0])[:max_query_num]
+        sample_points = sample_points[random_indice]
+        query_points = query_points[random_indice]
+        
+    sample_mask[:, sample_points] = 1
+    #with B, N, 3
+    # query_points = torch.cat((torch.zeros((query_points.shape[0], 1), device=query_image.device), query_points), dim=1)
+    # query_points = query_points.unsqueeze(0).repeat(B,1,1)
+    return query_points, sample_points
+    
+
+    
 
 def get_sift_sampled_pts(
     video,
@@ -77,6 +107,7 @@ def get_sift_sampled_pts(
         )
         for kp in key_points:
             points.append([frame_num, int(kp.pt[0]), int(kp.pt[1])])
+            
     return torch.tensor(points[:size], device=device)[None]
 
 

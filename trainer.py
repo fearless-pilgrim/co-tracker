@@ -24,17 +24,18 @@ from torch.cuda.amp import GradScaler
 
 from pytorch_lightning.lite import LightningLite
 
-from cotracker.models.bootstap_predictor import TAPIRPredictor
 from cotracker.models.core.cotracker.cotracker import CoTracker2
 from cotracker.models.core.cotracker.cotracker3_offline import CoTrackerThreeOffline
 from cotracker.models.core.cotracker.cotracker3_online import CoTrackerThreeOnline
 
 from cotracker.utils.visualizer import Visualizer
 
+from megadepth_build import MultiviewMatcherDataModule
 from cotracker.evaluation.core.evaluator import Evaluator
-from cotracker.utils.geometry import dense_grid_spv
+from cotracker.datasets.geometry import dense_grid_spv
 from cotracker.datasets.utils import collate_fn, collate_fn_train, dataclass_to_cuda_
 from cotracker.models.core.model_utils import (
+    get_query_ponts,
     get_uniformly_sampled_pts,
     get_points_on_a_grid,
     get_sift_sampled_pts,
@@ -42,6 +43,8 @@ from cotracker.models.core.model_utils import (
 )
 from cotracker.models.core.cotracker.losses import sequence_loss
 from cotracker.models.build_cotracker import build_cotracker
+from dependency.mast3r.dust3r.load_att_feature import load_dust3r_model
+from megadepth_build import MultiviewMatcherDataModule
 from cotracker.utils.train_utils import (
     Logger,
     get_eval_dataloader,
@@ -73,9 +76,9 @@ def fetch_optimizer(args, model):
     return optimizer, scheduler
 
 
-def forward_batch(batch, model, args, teacher_models):
+def forward_batch(batch, model, args, teacher_models, visualizer=None):
     video = batch.video
-    trajs_g = batch.trajectory
+    trajs_g = batch.track
     vis_g = batch.visibility
     valids = batch.valid
     B, T, C, H, W = video.shape
@@ -83,9 +86,12 @@ def forward_batch(batch, model, args, teacher_models):
     B, T, N, D = trajs_g.shape
     device = video.device
     failed_sample = False
+    image_list = batch.image_list
+    assist_model = load_dust3r_model(model_name=args.assist_model_path,
+                                     image_list=image_list, batch_size=B,
+                                     img_size=args.img_resize, device=device, cat_model="to_origin")
     if args.real_data_filter_sift:
-        queries = get_sift_sampled_pts(video, N, T, [H, W], device=device)
-
+        queries = get_sift_sampled_pts(video, N, T, [H, W], num_sampled_frames=args.window_length, device=device)
         if queries.shape[1] < N:
             logging.warning(
                 f"SIFT wasn't able to extract enough features: {queries.shape[1]}"
@@ -100,62 +106,69 @@ def forward_batch(batch, model, args, teacher_models):
             failed_sample = True
             queries = get_uniformly_sampled_pts(N, T, [H, W], device=device)
     else:
-        queries = get_uniformly_sampled_pts(N, T, [H, W], device=device)
+        # queries = get_uniformly_sampled_pts(N, T, [H, W], device=device)
+        queries, sample_mask = get_query_ponts(video[:,0], max_query_num=args.max_query_num)
     # Inference with additional points sampled on a regular grid usually makes predictions better.
     # So we sample these points and discard them thereafter
+    if args.introduce_teacher:
+        teacher_model_ind = random.choice(range(len(teacher_models)))
 
-    teacher_model_ind = random.choice(range(len(teacher_models)))
-
-    teacher_model_type, teacher_model = teacher_models[teacher_model_ind]
-    uniform_size = grid_size = sift_size = 0
-    queries_cat = queries.clone()
-    if "online" in teacher_model_type:
-        grid_size = args.train_grid_size
-        sift_size = args.train_sift_size
-        if grid_size > 0:
-            xy = get_points_on_a_grid(grid_size, [H, W], device=device)
-            xy = torch.cat([torch.zeros_like(xy[:, :, :1]), xy], dim=2)  #
-            queries_cat = torch.cat([queries_cat, xy], dim=1)  #
-
-        if sift_size > 0:
-            xy = get_sift_sampled_pts(video, sift_size, T, [H, W], device=device)
-            if xy.shape[1] == sift_size:
+        teacher_model_type, teacher_model = teacher_models[teacher_model_ind]
+        uniform_size = grid_size = sift_size = 0
+        queries_cat = queries.clone()
+        if "online" in teacher_model_type:
+            grid_size = args.train_grid_size
+            sift_size = args.train_sift_size
+            if grid_size > 0:
+                xy = get_points_on_a_grid(grid_size, [H, W], device=device)
+                xy = torch.cat([torch.zeros_like(xy[:, :, :1]), xy], dim=2)  #
                 queries_cat = torch.cat([queries_cat, xy], dim=1)  #
-            else:
-                sift_size = 0
-    elif "offline" in teacher_model_type:
-        uniform_size = 100
-        if uniform_size > 0:
-            xy = get_uniformly_sampled_pts(uniform_size, T, [H, W], device=device)
-            queries_cat = torch.cat([queries_cat, xy], dim=1)  #
-    elif teacher_model_type == "tapir":
-        pass
-    else:
-        raise ValueError(f"Model type {teacher_model_type} doesn't exist")
 
-    if "cotracker_three" in teacher_model_type:
-        with torch.no_grad():
-            (
-                trajs_g,
-                vis_g,
-                confidence,
-                __,
-            ) = teacher_model(video, queries_cat)
-    else:
-        with torch.no_grad():
-            trajs_g, vis_g, *_ = teacher_model(video, queries_cat)
-            confidence = torch.ones_like(vis_g)
+            if sift_size > 0:
+                xy = get_sift_sampled_pts(video, sift_size, T, [H, W], device=device)
+                if xy.shape[1] == sift_size:
+                    queries_cat = torch.cat([queries_cat, xy], dim=1)  #
+                else:
+                    sift_size = 0
+        elif "offline" in teacher_model_type:
+            uniform_size = 100
+            if uniform_size > 0:
+                xy = get_uniformly_sampled_pts(uniform_size, T, [H, W], device=device)
+                queries_cat = torch.cat([queries_cat, xy], dim=1)  #
+        elif teacher_model_type == "tapir":
+            pass
+        else:
+            raise ValueError(f"Model type {teacher_model_type} doesn't exist")
 
-    # discarding additional points
-    if sift_size > 0 or grid_size > 0 or uniform_size > 0:
-        trajs_g = trajs_g[:, :, : -(grid_size**2) - sift_size - uniform_size]
-        vis_g = vis_g[:, :, : -(grid_size**2) - sift_size - uniform_size]
-        confidence = confidence[:, :, : -(grid_size**2) - sift_size - uniform_size]
+        if "cotracker_three" in teacher_model_type:
+            with torch.no_grad():
+                (
+                    trajs_g,
+                    vis_g,
+                    confidence,
+                    __,
+                ) = teacher_model(video, queries_cat)
+        else:
+            with torch.no_grad():
+                trajs_g, vis_g, *_ = teacher_model(video, queries_cat)
+                confidence = torch.ones_like(vis_g)
 
-    vis_g = vis_g > 0.9
+        # discarding additional points
+        if sift_size > 0 or grid_size > 0 or uniform_size > 0:
+            trajs_g = trajs_g[:, :, : -(grid_size**2) - sift_size - uniform_size]
+            vis_g = vis_g[:, :, : -(grid_size**2) - sift_size - uniform_size]
+            confidence = confidence[:, :, : -(grid_size**2) - sift_size - uniform_size]
+
+        vis_g = vis_g > 0.9
 
     batch.trajectory = trajs_g
     batch.visibility = vis_g
+    # visualizer.visualize(
+    #     video=batch.video.clone(),
+    #     tracks=trajs_g[..., sample_mask, :].clone(),
+    #     visibility=batch.visibility[..., sample_mask].clone().unsqueeze(-1),
+    #     filename="sample_gt_traj",
+    # )
 
     if args.model_name == "cotracker_three":
         if (
@@ -167,7 +180,7 @@ def forward_batch(batch, model, args, teacher_models):
             queries = torch.ones_like(queries).to(queries.device).float()
             valids = torch.zeros_like(valids).to(valids.device).float()
 
-        tracks, visibility, confidence, train_data = model(
+        tracks, visibility, confidence, train_data = model(feature_loader=assist_model,
             video=video, queries=queries, iters=args.train_iters, is_train=True
         )
         coord_predictions, vis_predictions, confidence_predicitons, valid_mask = (
@@ -307,29 +320,23 @@ class Lite(LightningLite):
 
         g = torch.Generator()
         g.manual_seed(0)
+        
+        train_dataset = MultiviewMatcherDataModule(
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            img_resize=args.img_resize,
+            random_seed=0,max_queries=args.max_queries,
+            img_pad=True, pin_memory=True,
+            scene_info_dir=args.scene_info_dir,
+            dataset_path=args.dataset_root,
+            train_val_list_path = args.train_val_list_path,
+        )
+        train_dataset.setup()
 
         if self.global_rank == 0:
-            eval_dataloaders = []
-            for ds_name in args.eval_datasets:
-                eval_dataloaders.append(
-                    (ds_name, get_eval_dataloader(args.dataset_root, ds_name))
-                )
-            if not args.debug:
-                final_dataloaders = [dl for dl in eval_dataloaders]
-                ds_name = "tapvid_kinetics_first"
-                final_dataloaders.append(
-                    (ds_name, get_eval_dataloader(args.dataset_root, ds_name))
-                )
+            eval_dataloaders = train_dataset.val_dataloader()
+            final_dataloaders = train_dataset.test_dataloader()
 
-                ds_name = "tapvid_robotap"
-                final_dataloaders.append(
-                    (ds_name, get_eval_dataloader(args.dataset_root, ds_name))
-                )
-
-                ds_name = "dynamic_replica"
-                final_dataloaders.append(
-                    (ds_name, get_eval_dataloader(args.dataset_root, ds_name))
-                )
             evaluator = Evaluator(args.ckpt_path)
 
             visualizer = Visualizer(
@@ -352,8 +359,8 @@ class Lite(LightningLite):
                 model = CoTrackerThreeOffline(
                     stride=4,
                     corr_radius=3,
-                    window_len=60,
-                    model_resolution=(384, 512),
+                    window_len=args.window_length,
+                    model_resolution=args.img_resize,
                     linear_layer_for_vis_conf=True,
                 )
             else:
@@ -361,7 +368,7 @@ class Lite(LightningLite):
                     stride=4,
                     corr_radius=3,
                     window_len=args.window_length,
-                    model_resolution=(384, 512),
+                    model_resolution=args.img_resize,
                     linear_layer_for_vis_conf=True,
                 )
         else:
@@ -373,20 +380,8 @@ class Lite(LightningLite):
         model.cuda()
         teacher_models = []
         # from cotracker.datasets import real_dataset
-        from megadepth_build import MultiviewMatcherDataModule
 
-        train_dataset = MultiviewMatcherDataModule(
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            img_resize=args.img_resize,
-            random_seed=seed_worker,
-            img_pad=True, pin_memory=True,
-            scene_info_dir=args.scene_info_dir,
-            dataset_path=args.dataset_root,
-            train_val_list_path = args.train_val_list_path,
-        )
-        train_dataset.setup()
-        train_loader = train_dataset.train_dataset()
+        train_loader = train_dataset.train_dataloader()
         
         train_loader = self.setup_dataloaders(train_loader, move_to_device=False)
         print("LEN TRAIN LOADER", len(train_loader))
@@ -402,47 +397,48 @@ class Lite(LightningLite):
             )
             teacher_models.append(("online", teacher_model_online))
         elif args.model_name == "cotracker_three":
-            teacher_model_online = (
-                build_cotracker(
-                    window_len=args.window_length,
-                    offline=False,
-                    checkpoint="./checkpoints/cotracker2v1.pth",
-                    v2=True,
-                )
-                .cuda()
-                .eval()
-            )
-            teacher_models.append(("online", teacher_model_online))
+            # teacher_model_online = (
+            #     build_cotracker(
+            #         window_len=args.window_length,
+            #         offline=False,
+            #         checkpoint="/home/wangzhiwei/depth_estimation/co-tracker/cotracker/checkpoints/scaled_offline.pth",
+            #         v2=True,
+            #     )
+            #     .cuda()
+            #     .eval()
+            # )
+            # teacher_models.append(("online", teacher_model_online))
+            teacher_models.append(("online", None))
         else:
             raise ValueError(f"Model {args.model_name} doesn't exist")
 
         online_checkpoint = "./checkpoints/baseline_online.pth"
         if args.model_name == "cotracker_three" and not args.offline_model:
             online_checkpoint = args.restore_ckpt
-        print("online_checkpoint", online_checkpoint)
-        teacher_model_online_cot_three = (
-            build_cotracker(checkpoint=online_checkpoint, offline=False, window_len=16)
-            .cuda()
-            .eval()
-        )
+        # print("online_checkpoint", online_checkpoint)
+        # teacher_model_online_cot_three = (
+        #     build_cotracker(checkpoint=online_checkpoint, offline=False, window_len=16)
+        #     .cuda()
+        #     .eval()
+        # )
         teacher_models.append(
-            ("online_cotracker_three", teacher_model_online_cot_three)
+            ("online_cotracker_three", None)
         )
 
-        offline_checkpoint = "./checkpoints/baseline_offline.pth"
-        if args.model_name == "cotracker_three" and args.offline_model:
-            offline_checkpoint = args.restore_ckpt
+        # offline_checkpoint = "./checkpoints/baseline_offline.pth"
+        # if args.model_name == "cotracker_three" and args.offline_model:
+        #     offline_checkpoint = args.restore_ckpt
 
-        teacher_model_offline_cot_three = (
-            build_cotracker(checkpoint=offline_checkpoint, offline=True, window_len=60)
-            .cuda()
-            .eval()
-        )
+        # teacher_model_offline_cot_three = (
+        #     build_cotracker(checkpoint=offline_checkpoint, offline=True, window_len=60)
+        #     .cuda()
+        #     .eval()
+        # )
         teacher_models.append(
-            ("offline_cotracker_three", teacher_model_offline_cot_three)
+            ("offline_cotracker_three", None)
         )
 
-        teacher_model_tapir = TAPIRPredictor()
+        teacher_model_tapir = None
         teacher_models.append(("tapir", teacher_model_tapir))
 
 
@@ -484,12 +480,19 @@ class Lite(LightningLite):
             state_dict = self.load(args.restore_ckpt)
             if "model" in state_dict:
                 state_dict = state_dict["model"]
-
+            
+            model_state_dict = model.state_dict()  # 获取新模型的state_dict
+            # 过滤掉不匹配的键
+            
             if list(state_dict.keys())[0].startswith("module."):
                 state_dict = {
                     k.replace("module.", ""): v for k, v in state_dict.items()
                 }
-            model.load_state_dict(state_dict, strict=True)
+
+            filtered_state_dict = {k: v for k, v in state_dict.items() if k in model_state_dict and model_state_dict[k].shape == v.shape}
+            model_state_dict.update(filtered_state_dict)
+
+            model.load_state_dict(model_state_dict)
 
             logging.info(f"Done loading checkpoint")
         model, optimizer = self.setup(model, optimizer, move_to_device=False)
@@ -503,26 +506,35 @@ class Lite(LightningLite):
         global_batch_num = 0
         epoch = -1
 
-        if self.global_rank == 0 and args.validate_at_start:
-            run_test_eval(
-                evaluator,
-                model,
-                eval_dataloaders,
-                logger.writer,
-                total_steps,
-            )
-            model.train()
-            torch.cuda.empty_cache()
+        # if self.global_rank == 0 and args.validate_at_start:
+        #     run_test_eval(
+        #         evaluator,
+        #         model,
+        #         eval_dataloaders,
+        #         logger.writer,
+        #         total_steps,
+        #     )
+        #     model.train()
+        #     torch.cuda.empty_cache()
 
         while should_keep_training:
             epoch += 1
             for i_batch, batch in enumerate(tqdm(train_loader)):
-                batch, gotit = dense_grid_spv(batch)
-                breakpoint()
-                # batch, gotit = batch
+                
+                # batch, gotit = dense_grid_spv(batch)
+                batch, gotit = batch
                 if not all(gotit):
                     print("batch is None")
                     continue
+                visualizer.visualize(
+                    video=batch.video.clone(),
+                    tracks=batch.trajectory.clone(),
+                    visibility=batch.visibility.clone().unsqueeze(-1),
+                    filename="sampler_warp_gt_traj",
+                    # writer=logger.writer,
+                    step=total_steps,
+                )
+                breakpoint()
                 dataclass_to_cuda_(batch)
 
                 optimizer.zero_grad()
@@ -530,7 +542,7 @@ class Lite(LightningLite):
                 assert model.training
 
                 output = forward_batch(
-                    batch, model, args, teacher_models=teacher_models
+                    batch, model, args, teacher_models=teacher_models, visualizer=visualizer
                 )
 
                 loss = 0

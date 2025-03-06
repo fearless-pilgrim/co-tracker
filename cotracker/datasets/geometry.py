@@ -5,8 +5,8 @@ import matplotlib.pyplot as plt
 from einops import rearrange, repeat
 from torch.nn import functional as F
 from kornia.utils import create_meshgrid
-from datasets.utils import CoTrackerData
-
+from cotracker.datasets.utils import CoTrackerData
+from cotracker.models.core.model_utils import get_query_ponts
 def plot(src_pts, vector):
     """
     Only for debug visualization.
@@ -39,7 +39,7 @@ def warp_source_views(
     dst_origin_imgs_sizes,
     depth_consistency_thres=0.2,
     cycle_reproj_distance_thres=5, # pixel
-    border_thres=8,
+    border_thres=2,
 ):
     """
     Warp source view points to multiple query views and check depth consistency.
@@ -65,6 +65,7 @@ def warp_source_views(
     device = src_points.device
     B, N_pts = src_points.shape[:2]
     _, N_dst = dst_intrinsic.shape[:2]
+
     # Sample depth, get calculable_mask on depth != 0
     src_points_depth = torch.stack(
         [
@@ -148,7 +149,7 @@ def warp_source_views(
     valid_mask = (
         nonzero_mask[:, None] * src_border_mask[:, None] * covisible_mask * consistency_mask * cycle_reproj_distance_mask * cycle_depth_distance_mask
     )  # B * N_dst * N_pts
-    
+    """
     # Get absolute scale of each points:
     dst_scales_absolute = dst_intrinsic[:, :, 0, 0][..., None] / (proj_depth + 1e-4) # B * N_dst * N_pts
     src_scales_absolute = src_intrinsic[:, 0, 0][..., None] / (src_points_depth + 1e-4) # B * N_pts
@@ -157,7 +158,7 @@ def warp_source_views(
     # Get relative view points infos:
     relative_pose = src_extrin[:, None] @ dst_extrin.inverse()# B * N_dst * 4 * 4
     t = relative_pose[..., :3, 3] # B * N_dst * 3, from src camera to dst camera
-    """
+    
              /             \
             /               \
          f /                 \ a
@@ -165,7 +166,7 @@ def warp_source_views(
          / alpha         beta  \
         /_______________________\
     src_view        t         dst_view;  view_point_vector is encoded by the t_norm and the gamma
-    """
+    
     # plot(src_pts=np.zeros((t.shape[1], 3)), vector=t[0].cpu().numpy())
     f = repeat(src_points_cam.transpose(1,2), 'b n_track c -> b n_view n_track c', n_view=N_dst) # B * N_dst * N_track * 3
     t = repeat(t, 'b n_view c -> b n_view n_track c', n_track=N_pts) # B * N_dst * N_track * 3
@@ -176,8 +177,9 @@ def warp_source_views(
     gamma = torch.arccos(torch.zeros(1, device=a.device)).item() * 2  - alpha - beta
     view_point_vector = (t / (t_norm + 1e-4)) * gamma # B * N_dst * N_track * 3
     view_point_vector = torch.cat([torch.zeros((B, 1, N_pts, 3), device=view_point_vector.device), view_point_vector], dim=1) # B * N_view * N_track * 3
-
     return valid_mask, dst_pts, world_points.transpose(2, 1), scale_absolute, view_point_vector
+    """
+    return valid_mask, dst_pts, world_points.transpose(2, 1)
 
 @torch.no_grad()
 def mask_grid_pts_at_padded_regions(grid_pt, mask, scale=8):
@@ -212,21 +214,29 @@ def dense_grid_spv(data):
     device = data["depth"].device
     track_length_tolerance = 0
     # Generate grid coordinates:
-    B, N, _, H, W = data["images"].shape
+    B, N, _, H, W = data["video"].shape
+    
+
     scale = (
         grid_scale * data["scales"][..., None, [1, 0]]
         if "scales" in data
         else grid_scale
     )  # B * N_view * 1 * 2
+
+    """
     h_coarse, w_coarse = map(lambda x: x // grid_scale, [H, W])
     grid_coord_c = create_meshgrid(
         h_coarse, w_coarse, normalized_coordinates=False, device=device
     ).reshape(1, 1, h_coarse * w_coarse, 2)
+    """
+    grid_coord_c, sample_mask = get_query_ponts(data['video'][:,0], max_query_num=data['max_queries'])
+    # logger.info(f"shape of grid_coord_c {grid_coord_c.shape} and scale shape {scale.shape}")
+    grid_coord_c = grid_coord_c.unsqueeze(0).to(device)  # 1 * 1 * n_points * 2
     # grid_coord_c = grid_coord_c * scale  # B * N * n_points * 2, in original image scale
-
     # Warp reference view to query views:
     # NOTE: no need mutual nearest neighbour
-    query_coords = grid_coord_c[:, 0]  # [B, n_pts, 2]
+    query_coords = grid_coord_c.to(device)  # [B, n_pts, 2]
+    # query_coords = grid_coord_c[:,0]  # [B, n_pts, 2]
     # Mask padded regions:
     if "masks" in data:
         grid_coord_c, pad_mask = mask_grid_pts_at_padded_regions(
@@ -236,7 +246,7 @@ def dense_grid_spv(data):
     else:
         pad_mask = None
 
-    valid_mask, warpped_pts, world_points, scales_absolute, view_point_vector = warp_source_views(
+    valid_mask, warpped_pts, world_points = warp_source_views(
         src_points=query_coords,
         src_depth_map=data["depth"][:, 0],
         src_intrinsic=data["intrinsics"][:, 0],
@@ -254,49 +264,60 @@ def dense_grid_spv(data):
 
     # Find valid GT tracks and sample(or pad)
     n_query_view, n_pts = valid_mask.shape[1:]
-    track_valid_mask = torch.sum(valid_mask, dim=1) >= (
-        n_query_view - track_length_tolerance
-    )  # [B, 1, n_pts]
-    n_pts_idxs = torch.arange(0, n_pts, device=device)
-
-    valid_pt_idxs_list = []
-    padded_mask_list = []
-
+    # track_valid_mask = torch.sum(valid_mask, dim=1) >= (
+    #     n_query_view - track_length_tolerance
+    # )  # [B, 1, n_pts]
+    track_valid_mask = valid_mask[:, 0]  # [B, n_pts]
     # GT:
-    padded_mask = torch.stack(padded_mask_list, dim=0)[:, None].expand(-1, n_query_view, -1) # B * n_dst * n_selected
-    valid_mask = torch.stack(
-        [valid_mask[i, :, valid_pt_idxs_list[i]] for i in range(B)]
-    )  # [B, n_dst, n_selected]
-    valid_mask[padded_mask] = 0
+    reference_points = warpped_pts
 
-    reference_points = torch.stack(
-        [warpped_pts[i, :, valid_pt_idxs_list[i]] for i in range(B)]
-    )  # [B, n_dst, n_selected, 2]
+    world_points = world_points
 
-    world_points = torch.stack(
-        [world_points[i, valid_pt_idxs_list[i]] for i in range(B)]
-    )  # [B, n_selected, 3]
+    query_points = query_coords  # [B, n_selected, 2]  # [B, n_selected, 2]
 
-    query_points = torch.stack(
-        [query_coords[i, valid_pt_idxs_list[i]] for i in range(B)]
-    )  # [B, n_selected, 2]
-
-    view_point_vector = torch.stack([view_point_vector[i, :, valid_pt_idxs_list[i]] for i in range(B)]) # # B * n_view * n_selected * 3
-    breakpoint()
-    query_points = (query_points / scale[:, 1:]).round()
-    reference_points = (reference_points / scale[:, 1:]).round()
+    # query_points = (query_points / scale[:, 0]).round()
+    # reference_points = (reference_points / scale[:, 1:]).round()
+    trajectory=torch.cat((query_points.unsqueeze(1), reference_points), dim=1)
+    # trajectory = remap_track(trajectory, H, W, data['original_hw']).round()
+    trajectory = (trajectory / scale).round()
     # NOTE: all points are in original scale
-    breakpoint()
     return (
         CoTrackerData(
-            video=data["video"],# [B, N, C, H ,W]
-            trajectory=reference_points, # [B, n_dst, n_selected, 2]
-            visibility=track_valid_mask, # [B, n_dst, n_selected]
-            valid=torch.stack([True for b in range(B)], dim=0),
+            video=data["video"].squeeze(0),# [B, N, C, H ,W]
+            # trajectory=reference_points, # [B, n_dst, n_selected, 2]
+            visibility=torch.cat((track_valid_mask.unsqueeze(1), valid_mask), dim=1).squeeze(0), # [B, N, n_selected]
+            valid=torch.ones_like(track_valid_mask).squeeze(0), # [B, n_dst, n_selected]
             seq_name=data["scene_name"], #scene name of megadepth
-            query_points=query_points, # [B, n_selected, 2]
+            query_points=trajectory[:,0].squeeze(0), # [B, n_selected, 2]
+            trajectory=trajectory.squeeze(0), # [B, N, n_selected, 2]
+            image_list=data["image_list"], # [B, N]
         ),
-        torch.stack([True for b in range(B)], dim=0),
+        True,
     )
-    return valid_mask, torch.cat((query_coords.unsqueeze(0), warpped_pts), dim=1), world_points, scales_absolute, view_point_vector
 
+def remap_track(track, H, W, ori_size):
+    """
+    track: [B, N, T, 2] - 原始坐标
+    H, W: 原始图像尺寸
+    H1, W1: 缩放后图像尺寸
+    """
+    import cv2
+    B, N, T, _ = track.shape
+
+    track_resized = np.zeros_like(track)
+    for b in range(B):
+        for n in range(N):
+            for t in range(T):
+                # 创建像素映射表
+                H1, W1 = ori_size[b, n]
+
+                map_x, map_y = np.meshgrid(np.linspace(0, W-1, W1), np.linspace(0, H-1, H1))
+
+                map_x = map_x.astype(np.float32)
+                map_y = map_y.astype(np.float32)
+                x, y = track[b, n, t]
+                
+                new_x = cv2.remap(map_x, np.array([[x]], dtype=np.float32), np.array([[y]], dtype=np.float32), interpolation=cv2.INTER_LANCZOS4)
+                new_y = cv2.remap(map_y, np.array([[x]], dtype=np.float32), np.array([[y]], dtype=np.float32), interpolation=cv2.INTER_LANCZOS4)
+                track_resized[b, n, t] = [new_x[0,0], new_y[0,0]]
+    return torch.tensor(track_resized, device=track.device)

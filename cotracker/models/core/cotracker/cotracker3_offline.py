@@ -61,13 +61,14 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
         # vis_init = B T N 1
         H4, W4 = H // self.stride, W // self.stride
         assert T >= 1  # A tracker needs at least two frames to track something
-        
         #load B*T 2 C H_ W_ features
-        att_features = feature_loader.load_features(video)
-        _, _, att_dim, att_H, att_W = att_features.shape
+        att_features = feature_loader.load_features()
+        _, _, _, att_dim, att_H, att_W = att_features.shape
         assert att_H == H4 // self.stride and att_W == W4 // self.stride
-        att_fea_ = att_features[:, 0].reshape(B, T, att_dim, att_H, att_W)
-        att_fea_l = att_features[:, 1]
+        #split the attention features with hook layers, add to the feature pyramid
+        #to replace the higher level features ((W4//4, H4//4) (W4//8, H4//8)) with 2D features
+        att_fea_ = att_features[:, :, 0].reshape(B, T, att_dim, att_H, att_W)
+        att_fea_l = att_features[:, :, 1]
         video = 2 * (video / 255.0) - 1.0
         dtype = video.dtype
         queried_frames = queries[:, :, 0].long()
@@ -115,14 +116,10 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
         track_feat_pyramid = []
         track_feat_support_pyramid, track_att_pyramid = [], []
         fmaps_pyramid.append(fmaps)
-        
-        #(H4//4, W4//4) (W4//8, H4//8)
-        att_pyramid.append(att_fea_)
-        att_fea_l = F.avg_pool2d(att_fea_l.reshape(B*T, att_dim, att_H, att_W), 2, stride=2)
-        att_pyramid.append(att_fea_l.reshape(B, T, att_dim, att_H//2, att_W//2))
 
-        # (H4, W4) (H4//2, W4//2) (W4//4, H4//4) (W4//8, H4//8)
-        for i in range(self.corr_levels - 1):
+        for i in range(self.corr_levels - 3):
+                
+            #replace the higher level features with attention features
             fmaps_ = fmaps.reshape(
                 B * T, self.latent_dim, fmaps.shape[-2], fmaps.shape[-1]
             )
@@ -132,10 +129,15 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
                 B, T, self.latent_dim, fmaps_.shape[-2], fmaps_.shape[-1]
             )
             fmaps_pyramid.append(fmaps)
-
+            
+        # (H4, W4) (H4//2, W4//2) (W4//4, H4//4) (W4//8, H4//8)
+        fmaps_pyramid.append(att_fea_)
+        att_fea_l = F.avg_pool2d(att_fea_l.reshape(B*T, att_dim, att_H, att_W), 2, stride=2)
+        fmaps_pyramid.append(att_fea_l.reshape(B, T, att_dim, att_H//2, att_W//2))
 
         for i in range(self.corr_levels):
-            
+            #collect the support track features from attention maps
+            #(H4//4, W4//4) (W4//8, H4//8)
             track_feat, track_feat_support = self.get_track_feat(
                 fmaps_pyramid[i],
                 queried_frames,
@@ -145,18 +147,7 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
 
             track_feat_pyramid.append(track_feat.repeat(1, T, 1, 1))
             track_feat_support_pyramid.append(track_feat_support.unsqueeze(1))
-            
-            if i < 2:
-                continue
-            #collect the support track features from attention maps
-            #(H4//4, W4//4) (W4//8, H4//8)
-            _, track_feat_supp_d = self.get_track_feat(
-                att_pyramid[i-2],
-                queried_frames,
-                queried_coords / 2**i,
-                support_radius=self.corr_radius,
-            )
-            track_att_pyramid.append(track_feat_supp_d.unsqueeze(1))
+
         D_coords = 2
 
         coord_preds, vis_preds, confidence_preds = [], [], []
@@ -167,16 +158,17 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
 
         r = 2 * self.corr_radius + 1
 
-        for it in range(iters):
+        for _ in range(iters):
             coords = coords.detach()  # B T N 2
-            coords_init = coords.view(B * T, N, 2)
-            corr_embs, att_embs = [], []
-            corr_feats = []
+            coords_init = coords.reshape(B * T, N, 2)
+            corr_embs = []
             for i in range(self.corr_levels):
+                corr_feat = self.get_correlation_feat(
+                    fmaps_pyramid[i], coords_init / 2**i
+                )
+                print(f"corr_feat {corr_feat.shape} at level {i}")
                 if i < 2:
-                    corr_feat = self.get_correlation_feat(
-                        fmaps_pyramid[i], coords_init / 2**i
-                    )
+
                     track_feat_support = (
                         track_feat_support_pyramid[i]
                         .view(B, 1, r, r, N, self.latent_dim)
@@ -184,22 +176,20 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
                         .permute(0, 3, 1, 2, 4)
                     )
                 else:
-                    corr_feat = self.get_correlation_feat(
-                        att_pyramid[i-2], coords_init / 2**i
-                    )
+                    #higher level attention features have different size
                     track_feat_support = (
-                        track_att_pyramid[i-2]
+                        track_feat_support_pyramid[i]
                         .view(B, 1, r, r, N, att_dim)
                         .squeeze(1)
                         .permute(0, 3, 1, 2, 4)
                     )
-                    
+                
                 corr_volume = torch.einsum(
                     "btnhwc,bnijc->btnhwij", corr_feat, track_feat_support
                 )
                 corr_emb = self.corr_mlp(corr_volume.reshape(B * T * N, r * r * r * r))
                 corr_embs.append(corr_emb)
-            
+
             corr_embs = torch.cat(corr_embs, dim=-1)
             corr_embs = corr_embs.view(B, T, N, corr_embs.shape[-1])
             

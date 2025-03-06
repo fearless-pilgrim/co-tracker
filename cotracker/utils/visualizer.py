@@ -113,6 +113,7 @@ class Visualizer:
             255,
         )
         color_alpha = int(opacity * 255)
+
         tracks = tracks + self.pad_value
 
         if self.grayscale:
@@ -130,6 +131,7 @@ class Visualizer:
             compensate_for_camera_motion=compensate_for_camera_motion,
             color_alpha=color_alpha,
         )
+        
         if save_video:
             self.save_video(res_video, filename=filename, writer=writer, step=step)
         return res_video
@@ -154,7 +156,7 @@ class Visualizer:
             video_writer = imageio.get_writer(save_path, fps=self.fps)
 
             # Write frames to the video file
-            for frame in wide_list[2:-1]:
+            for frame in wide_list:
                 video_writer.append_data(frame)
 
             video_writer.close()
@@ -174,11 +176,10 @@ class Visualizer:
     ):
         B, T, C, H, W = video.shape
         _, _, N, D = tracks.shape
-
         assert D == 2
         assert C == 3
-        video = video[0].permute(0, 2, 3, 1).byte().detach().cpu().numpy()  # S, H, W, C
-        tracks = tracks[0].long().detach().cpu().numpy()  # S, N, 2
+        video = video[1].permute(0, 2, 3, 1).byte().detach().cpu().numpy()  # S, H, W, C
+        tracks = tracks[1].long().detach().cpu().numpy()  # S, N, 2
         if gt_tracks is not None:
             gt_tracks = gt_tracks[0].detach().cpu().numpy()
 
@@ -255,7 +256,6 @@ class Visualizer:
                     curr_tracks = curr_tracks - diff
                     curr_tracks = curr_tracks[:, segm_mask > 0]
                     curr_colors = curr_colors[:, segm_mask > 0]
-
                 res_video[t] = self._draw_pred_tracks(
                     res_video[t],
                     curr_tracks,
@@ -273,7 +273,7 @@ class Visualizer:
                 coord = (tracks[t, i, 0], tracks[t, i, 1])
                 visibile = True
                 if visibility is not None:
-                    visibile = visibility[0, t, i]
+                    visibile = visibility[1, t, i]
                 if coord[0] != 0 and coord[1] != 0:
                     if not compensate_for_camera_motion or (
                         compensate_for_camera_motion and segm_mask[i] > 0

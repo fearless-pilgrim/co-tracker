@@ -21,6 +21,7 @@ class CoTrackerData:
     video: torch.Tensor  # B, S, C, H, W
     trajectory: torch.Tensor  # B, S, N, 2
     visibility: torch.Tensor  # B, S, N
+    track: Optional[torch.Tensor] = None  # B, S, N
     # optional data
     valid: Optional[torch.Tensor] = None  # B, S, N
     segmentation: Optional[torch.Tensor] = None  # B, S, 1, H, W
@@ -28,6 +29,7 @@ class CoTrackerData:
     query_points: Optional[torch.Tensor] = None  # TapVID evaluation format
     transforms: Optional[Dict[str, Any]] = None
     aug_video: Optional[torch.Tensor] = None
+    image_list: Optional[list] = None
 
 
 def collate_fn(batch):
@@ -59,6 +61,7 @@ def collate_fn_train(batch):
     Collate function for video tracks data during training.
     """
     gotit = [gotit for _, gotit in batch]
+    image_list = [b.image_list for b, _ in batch]
     video = torch.stack([b.video for b, _ in batch], dim=0)
     trajectory = torch.stack([b.trajectory for b, _ in batch], dim=0)
     visibility = torch.stack([b.visibility for b, _ in batch], dim=0)
@@ -83,6 +86,7 @@ def collate_fn_train(batch):
             query_points=query_points,
             aug_video=aug_video,
             transforms=transforms,
+            image_list=image_list,
         ),
         gotit,
     )
