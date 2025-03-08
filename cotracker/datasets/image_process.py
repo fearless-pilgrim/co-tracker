@@ -99,7 +99,7 @@ def adjust_intrinsic(K, scales, padding=False, paddings=None):
         K_new[1, 2] = K_new[1, 2] * scale_h + pad_h  # 调整 cy
     return K_new
 
-def resize_and_pad_depth(depth, target_size, pad_size, device='cuda'):
+def resize_and_pad_depth(depth, target_size, pad_size):
     """
     对深度图进行 resize 和 padding，使其与 RGB 图像对齐
     :param depth: numpy array, 原始深度图 (H, W)
@@ -116,14 +116,13 @@ def resize_and_pad_depth(depth, target_size, pad_size, device='cuda'):
 
     # Step 2: Padding（填充右下角）
     if pad_size is None:
-        return torch.from_numpy(resized_depth).float().to(device)
+        return torch.from_numpy(resized_depth).float()
     pad_w, pad_h = pad_size
     h, w = resized_depth.shape
     padded_depth = np.full((pad_h, pad_w), fill_value=0, dtype=np.float32)  # 以0填充
     padded_depth[:h, :w] = resized_depth  # 将resize后的深度图放置到左上角
-
     # 转换为 PyTorch Tensor 并移动到 GPU
-    padded_depth = torch.from_numpy(padded_depth).float().to(device)
+    padded_depth = torch.from_numpy(padded_depth).float()
 
     return padded_depth
 

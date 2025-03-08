@@ -57,6 +57,13 @@ if __name__ == "__main__":
         help="evaluate during training after every n epochs, after every epoch by default",
     )
     parser.add_argument(
+        "--save_loss_every_n_step",
+        type=int,
+        default=500,
+        help="evaluate during training after every n epochs, after every epoch by default",
+    )
+
+    parser.add_argument(
         "--save_every_n_epoch",
         type=int,
         default=1,

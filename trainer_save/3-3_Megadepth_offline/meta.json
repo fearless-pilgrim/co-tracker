@@ -11,7 +11,7 @@
         "tapvid_stacking"
     ],
     "eval_max_seq_len": 1000,
-    "evaluate_every_n_epoch": 10,
+    "evaluate_every_n_epoch": 20,
     "img_resize": [
         384,
         512
@@ -39,8 +39,9 @@
     ],
     "restore_ckpt": "/home/wangzhiwei/depth_estimation/co-tracker/cotracker/checkpoints/scaled_offline.pth",
     "sample_vis_1st_frame": false,
-    "save_every_n_epoch": 5,
+    "save_every_n_epoch": 1,
     "save_freq": 200,
+    "save_loss_every_n_step": 500,
     "scene_info_dir": "/data1/local_userdata/wangzhiwei/datasets/MegaDepth_v1/multiview_matching_indices/scenes/",
     "sequence_len": 6,
     "sliding_window_len": 60,

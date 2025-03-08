@@ -275,20 +275,21 @@ def dense_grid_spv(data):
 
     query_points = query_coords  # [B, n_selected, 2]  # [B, n_selected, 2]
 
-    # query_points = (query_points / scale[:, 0]).round()
-    # reference_points = (reference_points / scale[:, 1:]).round()
+    query_points = (query_points / scale[:, 0]).round()
+    reference_points = (reference_points / scale[:, 1:]).round()
     trajectory=torch.cat((query_points.unsqueeze(1), reference_points), dim=1)
     # trajectory = remap_track(trajectory, H, W, data['original_hw']).round()
-    trajectory = (trajectory / scale).round()
+    query_points = torch.cat((torch.zeros((query_points.shape[0], query_points.shape[1], 1), device=query_points.device), query_points), dim=-1)
     # NOTE: all points are in original scale
+    visibility = torch.cat((track_valid_mask.unsqueeze(1), valid_mask), dim=1)  # [B, n_dst, n_selected]
     return (
         CoTrackerData(
             video=data["video"].squeeze(0),# [B, N, C, H ,W]
             # trajectory=reference_points, # [B, n_dst, n_selected, 2]
-            visibility=torch.cat((track_valid_mask.unsqueeze(1), valid_mask), dim=1).squeeze(0), # [B, N, n_selected]
-            valid=torch.ones_like(track_valid_mask).squeeze(0), # [B, n_dst, n_selected]
+            visibility=visibility.squeeze(0), # [B, N, n_selected]
+            valid=torch.ones_like(visibility).squeeze(0), # [B, n_dst, n_selected]
             seq_name=data["scene_name"], #scene name of megadepth
-            query_points=trajectory[:,0].squeeze(0), # [B, n_selected, 2]
+            query_points=query_points.squeeze(0), # [B, n_selected, 2]
             trajectory=trajectory.squeeze(0), # [B, N, n_selected, 2]
             image_list=data["image_list"], # [B, N]
         ),

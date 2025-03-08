@@ -21,7 +21,6 @@ from cotracker.models.core.cotracker.cotracker3_offline import CoTrackerThreeOff
 from cotracker.models.core.cotracker.cotracker3_online import CoTrackerThreeOnline
 import logging
 
-
 class Evaluator:
     """
     A class defining the CoTracker evaluator.
@@ -183,26 +182,19 @@ class Evaluator:
         visualize_every: int = 50,
         writer: Optional[SummaryWriter] = None,
         step: Optional[int] = 0,
+        assist_model = None,
+        evaluate_num= 5,
     ):
         metrics = {}
 
         vis = Visualizer(
             save_dir=self.exp_dir,
-            fps=7,
+            fps=1,
         )
 
         for ind, sample in enumerate(tqdm(test_dataloader)):
-            if isinstance(sample, tuple):
-                sample, gotit = sample
-                if not all(gotit):
-                    print("batch is None")
-                    continue
-            if torch.cuda.is_available():
-                dataclass_to_cuda_(sample)
-                device = torch.device("cuda")
-            else:
-                device = torch.device("cpu")
-
+            sample, gotit = sample
+            dataclass_to_cuda_(sample)
             if (
                 not train_mode
                 and hasattr(model, "sequence_len")
@@ -210,27 +202,7 @@ class Evaluator:
             ):
                 print(f"skipping batch {ind}")
                 continue
-
-            if "tapvid" in dataset_name:
-                queries = sample.query_points.clone().float()
-
-                queries = torch.stack(
-                    [
-                        queries[:, :, 0],
-                        queries[:, :, 2],
-                        queries[:, :, 1],
-                    ],
-                    dim=2,
-                ).to(device)
-            else:
-                queries = torch.cat(
-                    [
-                        torch.zeros_like(sample.trajectory[:, 0, :, :1]),
-                        sample.trajectory[:, 0],
-                    ],
-                    dim=2,
-                ).to(device)
-
+            queries = sample.query_points
             if isinstance(model.model, CoTrackerThreeOnline):
                 online_model = CoTrackerOnlinePredictor(checkpoint=None)
                 online_model.model = model.model
@@ -252,8 +224,8 @@ class Evaluator:
                     )  # B T N 2,  B T N 1
                 pred_tracks = (pred_tracks, pred_visibility)
             else:
-                pred_tracks = model(sample.video, queries)
-
+                pred_tracks = model(video=sample.video, queries=queries, 
+                    image_list=sample.image_list, assist_model=assist_model)
             if "strided" in dataset_name:
                 inv_video = sample.video.flip(1).clone()
                 inv_queries = queries.clone()
@@ -285,4 +257,6 @@ class Evaluator:
                     step=step,
                 )
             self.compute_metrics(metrics, sample, pred_tracks, dataset_name)
+            if ind > evaluate_num:
+                break
         return metrics

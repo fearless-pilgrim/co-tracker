@@ -3,12 +3,12 @@
 
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
-
+import gc
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from cotracker.models.core.cotracker.cotracker3_online import CoTrackerThreeBase, posenc
-
+from loguru import logger
 torch.manual_seed(0)
 
 
@@ -25,6 +25,7 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
         add_space_attn=True,
         fmaps_chunk_size=200,
         feature_loader = None,
+        image_list = None,
     ):
         """Predict tracks
 
@@ -62,7 +63,7 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
         H4, W4 = H // self.stride, W // self.stride
         assert T >= 1  # A tracker needs at least two frames to track something
         #load B*T 2 C H_ W_ features
-        att_features = feature_loader.load_features()
+        att_features = feature_loader.load_features(image_list, B,device)
         _, _, _, att_dim, att_H, att_W = att_features.shape
         assert att_H == H4 // self.stride and att_W == W4 // self.stride
         #split the attention features with hook layers, add to the feature pyramid
@@ -112,9 +113,8 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
         fmaps = fmaps.to(dtype)
         
         # We compute track features
-        fmaps_pyramid, att_pyramid = [], []
-        track_feat_pyramid = []
-        track_feat_support_pyramid, track_att_pyramid = [], []
+        fmaps_pyramid = []
+        track_feat_support_pyramid = []
         fmaps_pyramid.append(fmaps)
 
         for i in range(self.corr_levels - 3):
@@ -134,18 +134,17 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
         fmaps_pyramid.append(att_fea_)
         att_fea_l = F.avg_pool2d(att_fea_l.reshape(B*T, att_dim, att_H, att_W), 2, stride=2)
         fmaps_pyramid.append(att_fea_l.reshape(B, T, att_dim, att_H//2, att_W//2))
-
         for i in range(self.corr_levels):
             #collect the support track features from attention maps
             #(H4//4, W4//4) (W4//8, H4//8)
-            track_feat, track_feat_support = self.get_track_feat(
+            _, track_feat_support = self.get_track_feat(
                 fmaps_pyramid[i],
                 queried_frames,
                 queried_coords / 2**i,
                 support_radius=self.corr_radius,
             )
 
-            track_feat_pyramid.append(track_feat.repeat(1, T, 1, 1))
+            # track_feat_pyramid.append(track_feat.repeat(1, T, 1, 1))
             track_feat_support_pyramid.append(track_feat_support.unsqueeze(1))
 
         D_coords = 2
@@ -157,8 +156,10 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
         coords = queried_coords.reshape(B, 1, N, 2).expand(B, T, N, 2).float()
 
         r = 2 * self.corr_radius + 1
-
-        for _ in range(iters):
+        del fmaps, att_fea_, att_fea_l
+        torch.cuda.empty_cache()
+        for it in range(iters):
+            # logger.info(f"process at iter {it}")
             coords = coords.detach()  # B T N 2
             coords_init = coords.reshape(B * T, N, 2)
             corr_embs = []
@@ -166,7 +167,7 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
                 corr_feat = self.get_correlation_feat(
                     fmaps_pyramid[i], coords_init / 2**i
                 )
-                print(f"corr_feat {corr_feat.shape} at level {i}")
+                # print(f"corr_feat {corr_feat.shape} at level {i}")
                 if i < 2:
 
                     track_feat_support = (
@@ -183,7 +184,6 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
                         .squeeze(1)
                         .permute(0, 3, 1, 2, 4)
                     )
-                
                 corr_volume = torch.einsum(
                     "btnhwc,bnijc->btnhwij", corr_feat, track_feat_support
                 )
@@ -194,7 +194,6 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
             corr_embs = corr_embs.view(B, T, N, corr_embs.shape[-1])
             
             transformer_input = [vis[..., None], confidence[..., None], corr_embs]
-
             rel_coords_forward = coords[:, :-1] - coords[:, 1:]
             rel_coords_backward = coords[:, 1:] - coords[:, :-1]
 
@@ -225,16 +224,17 @@ class CoTrackerThreeOffline(CoTrackerThreeBase):
                 .permute(0, 2, 1, 3)
                 .reshape(B * N, T, -1)
             )
-
+            
             x = x + self.interpolate_time_embed(x, T)
             # breakpoint()
             x = x.view(B, N, T, -1)  # (B N) T D -> B N T D
-            breakpoint()
             delta = self.updateformer(
                 x,
                 add_space_attn=add_space_attn,
             )
-
+            del corr_feat, track_feat_support, corr_volume, corr_emb, corr_embs, transformer_input, rel_pos_emb_input, x
+            gc.collect()
+            torch.cuda.empty_cache()
             delta_coords = delta[..., :D_coords].permute(0, 2, 1, 3)
             delta_vis = delta[..., D_coords].permute(0, 2, 1)
             delta_confidence = delta[..., D_coords + 1].permute(0, 2, 1)

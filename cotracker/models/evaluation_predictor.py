@@ -34,6 +34,7 @@ class EvaluationPredictor(torch.nn.Module):
         num_uniformly_sampled_pts: int = 0,
         n_iters: int = 6,
         local_extent: int = 50,
+        evaluate_num = 5,
     ) -> None:
         super(EvaluationPredictor, self).__init__()
         self.grid_size = grid_size
@@ -47,7 +48,8 @@ class EvaluationPredictor(torch.nn.Module):
         self.local_extent = local_extent
         self.model.eval()
 
-    def forward(self, video, queries):
+    def forward(self, video, queries,
+            image_list=None, assist_model=None):
         queries = queries.clone()
         B, T, C, H, W = video.shape
         B, N, D = queries.shape
@@ -62,79 +64,19 @@ class EvaluationPredictor(torch.nn.Module):
         )
         video = video.reshape(B, T, 3, interp_shape[0], interp_shape[1])
 
-        device = video.device
 
         queries[:, :, 1] *= (interp_shape[1] - 1) / (W - 1)
         queries[:, :, 2] *= (interp_shape[0] - 1) / (H - 1)
 
-        if self.single_point:
-            traj_e = torch.zeros((B, T, N, 2), device=device)
-            vis_e = torch.zeros((B, T, N), device=device)
-            conf_e = torch.zeros((B, T, N), device=device)
-
-            for pind in range((N)):
-                query = queries[:, pind : pind + 1]
-                t = query[0, 0, 0].long()
-                start_ind = 0
-                traj_e_pind, vis_e_pind, conf_e_pind = self._process_one_point(
-                    video[:,start_ind:], query
-                )
-                traj_e[:, start_ind:, pind : pind + 1] = traj_e_pind[:, :, :1]
-                vis_e[:, start_ind:, pind : pind + 1] = vis_e_pind[:, :, :1]
-                conf_e[:, start_ind:, pind : pind + 1] = conf_e_pind[:, :, :1]
-        else:
-            if self.grid_size > 0:
-                xy = get_points_on_a_grid(self.grid_size, video.shape[3:])
-                xy = torch.cat([torch.zeros_like(xy[:, :, :1]), xy], dim=2).to(
-                    device
-                )  #
-                queries = torch.cat([queries, xy], dim=1)  #
-
-            if self.num_uniformly_sampled_pts > 0:
-                xy = get_uniformly_sampled_pts(
-                    self.num_uniformly_sampled_pts,
-                    video.shape[1],
-                    video.shape[3:],
-                    device=device,
-                )
-                queries = torch.cat([queries, xy], dim=1)  #
-
-            sift_size = self.sift_size
-            if sift_size > 0:
-                xy = get_sift_sampled_pts(video, sift_size, T, [H, W], device=device)
-                if xy.shape[1] == sift_size:
-                    queries = torch.cat([queries, xy], dim=1)  #
-                else:
-                    sift_size = 0
-
-            preds = self.model(video=video, queries=queries, iters=self.n_iters)
-            traj_e, vis_e = preds[0], preds[1]
-            conf_e = None
-            if len(preds) > 3:
-                conf_e = preds[2]
-            if (
-                sift_size > 0
-                or self.grid_size > 0
-                or self.num_uniformly_sampled_pts > 0
-            ):
-                traj_e = traj_e[
-                    :,
-                    :,
-                    : -self.grid_size**2 - sift_size - self.num_uniformly_sampled_pts,
-                ]
-                vis_e = vis_e[
-                    :,
-                    :,
-                    : -self.grid_size**2 - sift_size - self.num_uniformly_sampled_pts,
-                ]
-                if conf_e is not None:
-                    conf_e = conf_e[
-                        :,
-                        :,
-                        : -self.grid_size**2
-                        - sift_size
-                        - self.num_uniformly_sampled_pts,
-                    ]
+        preds = self.model(video=video, 
+                           queries=queries, 
+                           iters=self.n_iters, 
+                           image_list=image_list, 
+                           feature_loader=assist_model)
+        traj_e, vis_e = preds[0], preds[1]
+        conf_e = None
+        if len(preds) > 3:
+            conf_e = preds[2]
 
         traj_e[:, :, :, 0] *= (W - 1) / float(interp_shape[1] - 1)
         traj_e[:, :, :, 1] *= (H - 1) / float(interp_shape[0] - 1)

@@ -12,7 +12,6 @@ from cotracker.models.core.embeddings import get_1d_sincos_pos_embed_from_grid
 
 from cotracker.models.core.cotracker.blocks import Mlp, BasicEncoder
 from cotracker.models.core.cotracker.cotracker import EfficientUpdateFormer
-
 torch.manual_seed(0)
 
 
@@ -62,6 +61,9 @@ class CoTrackerThreeBase(nn.Module):
 
         self.linear_layer_for_vis_conf = linear_layer_for_vis_conf
         self.fnet = BasicEncoder(input_dim=3, output_dim=self.latent_dim, stride=stride)
+
+        for param in self.fnet.parameters():
+            param.requires_grad = False
 
         highres_dim = 128
         lowres_dim = 256

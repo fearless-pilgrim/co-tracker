@@ -66,7 +66,7 @@ class Visualizer:
         save_dir: str = "./results",
         grayscale: bool = False,
         pad_value: int = 0,
-        fps: int = 15,
+        fps: int = 1,
         mode: str = "rainbow",  # 'cool', 'optical_flow'
         linewidth: int = 1,
         show_first_frame: int = 10,
@@ -178,8 +178,8 @@ class Visualizer:
         _, _, N, D = tracks.shape
         assert D == 2
         assert C == 3
-        video = video[1].permute(0, 2, 3, 1).byte().detach().cpu().numpy()  # S, H, W, C
-        tracks = tracks[1].long().detach().cpu().numpy()  # S, N, 2
+        video = video[0].permute(0, 2, 3, 1).byte().detach().cpu().numpy()  # S, H, W, C
+        tracks = tracks[0].long().detach().cpu().numpy()  # S, N, 2
         if gt_tracks is not None:
             gt_tracks = gt_tracks[0].detach().cpu().numpy()
 
@@ -273,7 +273,7 @@ class Visualizer:
                 coord = (tracks[t, i, 0], tracks[t, i, 1])
                 visibile = True
                 if visibility is not None:
-                    visibile = visibility[1, t, i]
+                    visibile = visibility[0, t, i]
                 if coord[0] != 0 and coord[1] != 0:
                     if not compensate_for_camera_motion or (
                         compensate_for_camera_motion and segm_mask[i] > 0

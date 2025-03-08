@@ -29,7 +29,6 @@ from cotracker.models.core.cotracker.cotracker3_offline import CoTrackerThreeOff
 from cotracker.models.core.cotracker.cotracker3_online import CoTrackerThreeOnline
 
 from cotracker.utils.visualizer import Visualizer
-
 from megadepth_build import MultiviewMatcherDataModule
 from cotracker.evaluation.core.evaluator import Evaluator
 from cotracker.datasets.geometry import dense_grid_spv
@@ -76,38 +75,22 @@ def fetch_optimizer(args, model):
     return optimizer, scheduler
 
 
-def forward_batch(batch, model, args, teacher_models, visualizer=None):
+def forward_batch(batch, model, args, 
+                  teacher_models, assist_model, 
+                  visualizer=None):
     video = batch.video
-    trajs_g = batch.track
+    trajs_g = batch.trajectory
     vis_g = batch.visibility
     valids = batch.valid
+    queries = batch.query_points
     B, T, C, H, W = video.shape
     assert C == 3
     B, T, N, D = trajs_g.shape
     device = video.device
     failed_sample = False
     image_list = batch.image_list
-    assist_model = load_dust3r_model(model_name=args.assist_model_path,
-                                     image_list=image_list, batch_size=B,
-                                     img_size=args.img_resize, device=device, cat_model="to_origin")
-    if args.real_data_filter_sift:
-        queries = get_sift_sampled_pts(video, N, T, [H, W], num_sampled_frames=args.window_length, device=device)
-        if queries.shape[1] < N:
-            logging.warning(
-                f"SIFT wasn't able to extract enough features: {queries.shape[1]}"
-            )
-            failed_sample = True
-            queries = get_uniformly_sampled_pts(N, T, [H, W], device=device)
-    elif args.real_data_filter_superpoint:
-        queries = get_superpoint_sampled_pts(video, N, T, [H, W], device=device)
 
-        if queries.shape[1] < N:
-            logging.warning("SuperPoint wasn't able to extract enough features")
-            failed_sample = True
-            queries = get_uniformly_sampled_pts(N, T, [H, W], device=device)
-    else:
-        # queries = get_uniformly_sampled_pts(N, T, [H, W], device=device)
-        queries, sample_mask = get_query_ponts(video[:,0], max_query_num=args.max_query_num)
+        
     # Inference with additional points sampled on a regular grid usually makes predictions better.
     # So we sample these points and discard them thereafter
     if args.introduce_teacher:
@@ -176,12 +159,13 @@ def forward_batch(batch, model, args, teacher_models, visualizer=None):
             or torch.isnan(trajs_g).any()
             or queries.abs().max() > 1500
         ):
+            
             logging.warning("failed_sample")
             queries = torch.ones_like(queries).to(queries.device).float()
             valids = torch.zeros_like(valids).to(valids.device).float()
 
         tracks, visibility, confidence, train_data = model(feature_loader=assist_model,
-            video=video, queries=queries, iters=args.train_iters, is_train=True
+            video=video, queries=queries, iters=args.train_iters, is_train=True, image_list=image_list
         )
         coord_predictions, vis_predictions, confidence_predicitons, valid_mask = (
             train_data
@@ -227,7 +211,7 @@ def forward_batch(batch, model, args, teacher_models, visualizer=None):
         output["visibility"] = {
             "predictions": visibility[0].detach(),
         }
-        if not (teacher_model_type == "tapir" or args.train_only_visible_points):
+        if not args.train_only_visible_points:
             seq_loss_invisible = sequence_loss(
                 coord_predictions,
                 traj_gts,
@@ -238,7 +222,6 @@ def forward_batch(batch, model, args, teacher_models, visualizer=None):
                 loss_only_for_visible=True,
             )
             output["flow_invisible"] = {"loss": seq_loss_invisible.mean() * 0.01}
-
         return output
     else:
         predictions, visibility, train_data = model(
@@ -332,7 +315,11 @@ class Lite(LightningLite):
             train_val_list_path = args.train_val_list_path,
         )
         train_dataset.setup()
-
+        assist_model = load_dust3r_model(model_name=args.assist_model_path,
+                            img_size=args.img_resize,  cat_model="to_origin")
+        for param in assist_model.model.parameters():
+            param.requires_grad = False
+        
         if self.global_rank == 0:
             eval_dataloaders = train_dataset.val_dataloader()
             final_dataloaders = train_dataset.test_dataloader()
@@ -384,8 +371,9 @@ class Lite(LightningLite):
         train_loader = train_dataset.train_dataloader()
         
         train_loader = self.setup_dataloaders(train_loader, move_to_device=False)
+        eval_dataloaders = self.setup_dataloaders(eval_dataloaders, move_to_device=False)
+        final_dataloaders = self.setup_dataloaders(final_dataloaders, move_to_device=False)
         print("LEN TRAIN LOADER", len(train_loader))
-
 
         if args.model_name == "cotracker":
             teacher_model_online = (
@@ -440,7 +428,6 @@ class Lite(LightningLite):
 
         teacher_model_tapir = None
         teacher_models.append(("tapir", teacher_model_tapir))
-
 
         optimizer, scheduler = fetch_optimizer(args, model)
 
@@ -526,15 +513,7 @@ class Lite(LightningLite):
                 if not all(gotit):
                     print("batch is None")
                     continue
-                visualizer.visualize(
-                    video=batch.video.clone(),
-                    tracks=batch.trajectory.clone(),
-                    visibility=batch.visibility.clone().unsqueeze(-1),
-                    filename="sampler_warp_gt_traj",
-                    # writer=logger.writer,
-                    step=total_steps,
-                )
-                breakpoint()
+
                 dataclass_to_cuda_(batch)
 
                 optimizer.zero_grad()
@@ -542,23 +521,35 @@ class Lite(LightningLite):
                 assert model.training
 
                 output = forward_batch(
-                    batch, model, args, teacher_models=teacher_models, visualizer=visualizer
+                    batch, model, args, 
+                    teacher_models=teacher_models,
+                    assist_model=assist_model,
+                    visualizer=visualizer
                 )
 
                 loss = 0
                 for k, v in output.items():
                     if "loss" in v:
                         loss += v["loss"]
-
                 if self.global_rank == 0:
-                    for k, v in output.items():
-                        if "loss" in v:
+                    if total_steps % args.save_loss_every_n_step == 0:
+                        for k, v in output.items():
+                            if "loss" in v:
+                                logger.writer.add_scalar(
+                                    f"live_{k}_loss", v["loss"].item(), total_steps
+                                )
+                            if "metrics" in v:
+                                logger.push(v["metrics"], k)
+                                
+                        if len(output) > 1:
                             logger.writer.add_scalar(
-                                f"live_{k}_loss", v["loss"].item(), total_steps
+                                f"live_total_loss", loss.item(), total_steps
                             )
-                        if "metrics" in v:
-                            logger.push(v["metrics"], k)
+                        logger.writer.add_scalar(
+                            f"learning_rate", optimizer.param_groups[0]["lr"], total_steps
+                        )
                     if total_steps % save_freq == save_freq - 1:
+                    # if total_steps % 10 == 0:
                         visualizer.visualize(
                             video=batch.video.clone(),
                             tracks=batch.trajectory.clone(),
@@ -578,14 +569,6 @@ class Lite(LightningLite):
                             writer=logger.writer,
                             step=total_steps,
                         )
-
-                    if len(output) > 1:
-                        logger.writer.add_scalar(
-                            f"live_total_loss", loss.item(), total_steps
-                        )
-                    logger.writer.add_scalar(
-                        f"learning_rate", optimizer.param_groups[0]["lr"], total_steps
-                    )
                     global_batch_num += 1
 
                 self.barrier()
@@ -601,16 +584,18 @@ class Lite(LightningLite):
                 total_steps += 1
                 if self.global_rank == 0:
                     if i_batch >= len(train_loader) - 1:
+                    # if i_batch >= 10:
                         if (epoch + 1) % args.save_every_n_epoch == 0:
+                        # if i_batch % args.save_every_n_epoch == 0:
                             ckpt_iter = "0" * (6 - len(str(total_steps))) + str(
                                 total_steps
                             )
                             save_path = Path(
                                 f"{args.ckpt_path}/model_{args.model_name}_{ckpt_iter}.pth"
                             )
-
+                            
                             save_dict = {
-                                "model": model.module.module.state_dict(),
+                                "model": model.module.state_dict(),
                                 "optimizer": optimizer.state_dict(),
                                 "scheduler": scheduler.state_dict(),
                                 "total_steps": total_steps,
@@ -618,14 +603,16 @@ class Lite(LightningLite):
 
                             logging.info(f"Saving file {save_path}")
                             self.save(save_dict, save_path)
-
                         if (epoch + 1) % args.evaluate_every_n_epoch == 0:
+                        # if i_batch % args.evaluate_every_n_epoch == 0:
+                        # if i_batch % 1 == 0:
                             run_test_eval(
                                 evaluator,
                                 model,
                                 eval_dataloaders,
                                 logger.writer,
                                 total_steps,
+                                assist_model=assist_model
                             )
                             model.train()
                             torch.cuda.empty_cache()
@@ -640,6 +627,7 @@ class Lite(LightningLite):
             PATH = f"{args.ckpt_path}/{args.model_name}_final.pth"
             torch.save(model.module.module.state_dict(), PATH)
             run_test_eval(
-                evaluator, model, final_dataloaders, logger.writer, total_steps
+                evaluator, model, final_dataloaders, logger.writer, total_steps,
+                assist_model=assist_model
             )
             logger.close()

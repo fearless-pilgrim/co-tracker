@@ -120,8 +120,8 @@ class MultiviewMatchingDataset(Dataset):
                 ts_depth = read_megadepth_depth(depth_path, resize=self.img_resize)
                 intrinsic_new = adjust_intrinsic(intrinsic, scale)
                 intrinsic = torch.from_numpy(intrinsic_new).to(torch.float32)
-                scale = torch.tensor([1, 1], device=self.device)
-                original_hw = torch.tensor(self.img_resize, device=self.device)
+                scale = torch.tensor([1, 1])
+                original_hw = torch.tensor(self.img_resize)
                 
             else:
                 ts_depth = read_megadepth_depth(depth_path, pad_to=self.depth_max_size)
@@ -162,12 +162,12 @@ class MultiviewMatchingDataset(Dataset):
             "scene_name": self.scene_name,
             "image_list": images_list,
             "video": images.unsqueeze(0),
-            "depth": depth_maps.unsqueeze(0).to(self.device),
-            "scales": img_scales.unsqueeze(0).to(self.device), # N * 2
+            "depth": depth_maps.unsqueeze(0),
+            "scales": img_scales.unsqueeze(0), # N * 2
             # "original_hw": img_resize.repeat(len(images_list),1).unsqueeze(0), # N * 2
-            "original_hw": img_original_hw.unsqueeze(0).to(self.device), # N * 2
-            "intrinsics": intrinsics.unsqueeze(0).to(self.device), # N * 3 * 3
-            "extrinsics": poses.unsqueeze(0).to(self.device), # w2c N * 4 * 4
+            "original_hw": img_original_hw.unsqueeze(0), # N * 2
+            "intrinsics": intrinsics.unsqueeze(0), # N * 3 * 3
+            "extrinsics": poses.unsqueeze(0), # w2c N * 4 * 4
             "max_queries": self.max_queries,
             # "relative_poses": relative_poses, # id_0 2 id_j
         }

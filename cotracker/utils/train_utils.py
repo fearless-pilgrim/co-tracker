@@ -15,6 +15,10 @@ from torch.utils.tensorboard import SummaryWriter
 from cotracker.datasets.dr_dataset import DynamicReplicaDataset
 from cotracker.models.evaluation_predictor import EvaluationPredictor
 
+def frozen_params(module):
+    for param in module.parameters():
+        param.requires_grad = False
+
 
 # define the handler function
 # for training on a slurm cluster
@@ -136,65 +140,51 @@ def get_train_dataset(args):
     return dataset
 
 
-def run_test_eval(evaluator, model, dataloaders, writer, step, query_random=False):
+def run_test_eval(evaluator, model, dataloaders, writer, step, 
+                  assist_model=None, query_random=False, ):
     model.eval()
-    for ds_name, dataloader in dataloaders:
-        visualize_every = 1
-        grid_size = 5
-        num_uniformly_sampled_pts = 0
-        if ds_name == "dynamic_replica":
-            visualize_every = 8
-            grid_size = 0
-        elif ds_name == "kubric":
-            visualize_every = 5
-            grid_size = 0
-        elif "davis" in ds_name or "tapvid_stacking" in ds_name:
-            visualize_every = 5
-        elif "robotap" in ds_name:
-            visualize_every = 20
-        elif "kinetics" in ds_name:
-            visualize_every = 50
-        if query_random:
-            grid_size = 0
-            num_uniformly_sampled_pts = 100
 
-        predictor = EvaluationPredictor(
-            model.module.module,
-            grid_size=grid_size,
-            local_grid_size=0,
-            single_point=False,
-            num_uniformly_sampled_pts=num_uniformly_sampled_pts,
-            n_iters=6,
-        )
+    visualize_every = 1
+    grid_size = 5
+    num_uniformly_sampled_pts = 0
 
-        if torch.cuda.is_available():
-            predictor.model = predictor.model.cuda()
+    # visualize_every = 5
+    # grid_size = 0
 
-        metrics = evaluator.evaluate_sequence(
-            model=predictor,
-            test_dataloader=dataloader,
-            dataset_name=ds_name,
-            train_mode=True,
-            writer=writer,
-            step=step,
-            visualize_every=visualize_every,
-        )
+    if query_random:
+        grid_size = 0
+        num_uniformly_sampled_pts = 100
+    predictor = EvaluationPredictor(
+        model.module,
+        # model,
+        grid_size=grid_size,
+        local_grid_size=0,
+        single_point=False,
+        num_uniformly_sampled_pts=num_uniformly_sampled_pts,
+        n_iters=6,
+    )
 
-        if ds_name == "dynamic_replica" or ds_name == "kubric":
-            metrics = {
-                f"{ds_name}_avg_{k}": v
-                for k, v in metrics["avg"].items()
-                if not ("1" in k or "2" in k or "4" in k or "8" in k)
-            }
+    if torch.cuda.is_available():
+        predictor.model = predictor.model.cuda()
+    metrics = evaluator.evaluate_sequence(
+        model=predictor,
+        assist_model=assist_model,
+        test_dataloader=dataloaders,
+        dataset_name="Megadepth",
+        train_mode=True,
+        writer=writer,
+        step=step,
+        visualize_every=visualize_every,
+    )
+    breakpoint()
+    metrics = {
+        f"Megadepth_val_avg_{k}": v
+        for k, v in metrics["avg"].items()
+        if not ("1" in k or "2" in k or "4" in k or "8" in k)
+    }
 
-        if "tapvid" in ds_name:
-            metrics = {
-                f"{ds_name}_avg_OA": metrics["avg"]["occlusion_accuracy"],
-                f"{ds_name}_avg_delta": metrics["avg"]["average_pts_within_thresh"],
-                f"{ds_name}_avg_Jaccard": metrics["avg"]["average_jaccard"],
-            }
 
-        writer.add_scalars(f"Eval_{ds_name}", metrics, step)
+    writer.add_scalars(f"Eval_Megadepth", metrics, step)
 
 
 class Logger:
@@ -250,6 +240,8 @@ class Logger:
 
         for key in results:
             self.writer.add_scalar(key, results[key], self.total_steps)
+
+  
 
     def close(self):
         self.writer.close()
